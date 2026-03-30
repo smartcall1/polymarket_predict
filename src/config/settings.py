@@ -116,8 +116,10 @@ max_bid_ask_spread: float = 0.20
 class EnsembleConfig:
     """Multi-agent ensemble decision configuration."""
     enabled: bool = field(default_factory=lambda: os.getenv("ENSEMBLE_ENABLED", "false").lower() == "true")
+    parallel_requests: bool = True
     min_models_for_consensus: int = 3
     disagreement_threshold: float = 0.25
+    calibration_tracking: bool = True
     agent_models: Dict[str, str] = field(default_factory=lambda: {
         "forecaster": os.getenv("GEMINI_MODEL", "gemini-2.5-flash"),
         "bull_researcher": os.getenv("GEMINI_MODEL", "gemini-2.5-flash"),
