@@ -19,7 +19,7 @@ import os
 from datetime import datetime, timezone
 
 from src.paper.tracker import (
-    log_signal, settle_signal, get_pending_signals, get_all_signals, get_stats,
+    log_signal, settle_signal, take_profit_signal, get_pending_signals, get_all_signals, get_stats,
     has_pending_signal,
 )
 from src.paper.dashboard import generate_html
@@ -158,6 +158,37 @@ async def check_settlements():
 
     for sig in pending:
         try:
+            # ── 익절 체크: AI 목표가 도달 시 조기 정산 ──
+            entry = sig.get("entry_price", 0)
+            confidence = sig.get("confidence", 0)
+            side = sig.get("side", "YES").upper()
+
+            if entry > 0 and confidence > entry:
+                ai_target = entry + 0.60 * (confidence - entry)
+
+                try:
+                    # Polymarket: token_id 없이 conditionId로 가격 조회
+                    mkt_check = await client.get_market(sig["market_id"])
+                    if mkt_check:
+                        prices = client.extract_market_prices(mkt_check)
+                        current_yes = prices["yes_price"]
+                        current_price = current_yes if side == "YES" else (1.0 - current_yes)
+
+                        if current_price >= ai_target:
+                            take_profit_signal(sig["id"], current_price)
+                            pnl = current_price - entry
+                            logger.info(f"TAKE PROFIT #{sig['id']}: {sig['market_title'][:40]} @ {current_price:.2f} (target={ai_target:.2f}, PnL={pnl:+.2f})")
+                            tg.notify_settlement(
+                                market_title=sig.get("market_title", ""),
+                                side=sig["side"], entry_price=entry,
+                                exit_price=current_price, pnl=pnl, result="WIN",
+                            )
+                            settled_count += 1
+                            continue
+                except Exception as e:
+                    logger.debug(f"Price check failed for {sig['market_id']}: {e}")
+
+            # ── 마켓 정산 체크 (기존 로직) ──
             mkt = await client.get_market(sig["market_id"])
             if not mkt:
                 continue
