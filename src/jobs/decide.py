@@ -237,7 +237,7 @@ async def make_decision_for_market(
 
         total_cost = 0.0
 
-        # Get real-time orderbook prices
+        # Get real-time orderbook prices (CLOB → Gamma fallback)
         yes_price = market.yes_price
         no_price = market.no_price
         has_orderbook = False
@@ -247,16 +247,35 @@ async def make_decision_for_market(
             try:
                 prices = await poly_client.get_best_prices(token_id)
                 if prices and prices.get("mid"):
-                    yes_price = prices["mid"]
-                    no_price = round(1.0 - yes_price, 4)
-                    has_orderbook = True
-                    logger.info(f"Orderbook: YES={yes_price:.2f} NO={no_price:.2f}")
+                    mid = prices["mid"]
+                    spread = prices.get("spread")
+                    # 오더북이 비어있으면 mid=0.50, spread=None → Gamma 가격 사용
+                    if spread is not None and abs(mid - 0.50) > 0.01:
+                        yes_price = mid
+                        no_price = round(1.0 - mid, 4)
+                        has_orderbook = True
+                        logger.info(f"Orderbook: YES={yes_price:.2f} NO={no_price:.2f}")
+                    elif market.yes_price != 0.5:
+                        # Gamma API 가격이 있으면 그걸 사용
+                        yes_price = market.yes_price
+                        no_price = market.no_price
+                        has_orderbook = True
+                        logger.info(f"Gamma price (thin orderbook): YES={yes_price:.2f} NO={no_price:.2f}")
+                    else:
+                        logger.info(f"Both orderbook and Gamma price are 0.50, skipping.")
+                        return None
             except Exception as e:
                 logger.debug(f"Orderbook fetch failed: {e}")
 
-        # Price filters
+        # Fallback: Gamma 가격이라도 있으면 사용
+        if not has_orderbook and market.yes_price != 0.5:
+            yes_price = market.yes_price
+            no_price = market.no_price
+            has_orderbook = True
+            logger.info(f"Gamma only: YES={yes_price:.2f} NO={no_price:.2f}")
+
         if not has_orderbook:
-            logger.info("No orderbook data, skipping.")
+            logger.info("No price data, skipping.")
             return None
         if yes_price < 0.05 or no_price < 0.05:
             logger.info(f"Dust price (YES={yes_price}), skipping.")

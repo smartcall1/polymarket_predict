@@ -18,7 +18,7 @@ class TraderAgent(BaseAgent):
 
     AGENT_NAME = "trader"
     AGENT_ROLE = "trader"
-    DEFAULT_MODEL = "gemini-3.1-pro-preview"
+    DEFAULT_MODEL = "gemini-2.5-pro"
 
     SYSTEM_PROMPT = (
         "You are the HEAD TRADER at an AI prediction-market fund. You are "
