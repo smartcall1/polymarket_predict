@@ -46,7 +46,7 @@ class TradingConfig:
     min_balance: float = 50.0
 
     # Market filtering
-    min_volume: float = 5000.0       # Polymarket은 유동성 풍부 → 기준 상향
+    min_volume: float = 10000.0      # Polymarket은 유동성 풍부 → $10K 이상만 분석
     max_time_to_expiry_days: int = 30
 
     # AI decision thresholds
