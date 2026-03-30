@@ -6,7 +6,7 @@ Uses the google.genai SDK (native async support).
 import json
 import time
 import os
-import pickle
+# pickle removed (security fix) — using JSON instead
 from typing import Dict, Optional, Any
 from dataclasses import dataclass
 from datetime import datetime, date
@@ -99,8 +99,9 @@ class GeminiClient(TradingLoggerMixin):
 
         self.total_cost = 0.0
         self.request_count = 0
+        self._last_decision_cost = 0.0
         self.daily_tracker = self._load_daily_tracker()
-        self.usage_file = "logs/daily_ai_usage.pkl"
+        self.usage_file = "logs/daily_ai_usage.json"
 
         self._client = None
         self._init_gemini()
@@ -118,13 +119,19 @@ class GeminiClient(TradingLoggerMixin):
 
     def _load_daily_tracker(self) -> DailyUsageTracker:
         today_str = date.today().isoformat()
-        usage_file = "logs/daily_ai_usage.pkl"
+        usage_file = "logs/daily_ai_usage.json"
         try:
             if os.path.exists(usage_file):
-                with open(usage_file, "rb") as f:
-                    tracker = pickle.load(f)
-                    if tracker.date == today_str:
-                        return tracker
+                with open(usage_file, "r", encoding="utf-8") as f:
+                    data = json.load(f)
+                    if data.get("date") == today_str:
+                        return DailyUsageTracker(
+                            date=data["date"],
+                            total_cost=data.get("total_cost", 0.0),
+                            request_count=data.get("request_count", 0),
+                            daily_limit=data.get("daily_limit", settings.trading.daily_ai_cost_limit),
+                            is_exhausted=data.get("is_exhausted", False),
+                        )
         except Exception:
             pass
         return DailyUsageTracker(date=today_str, daily_limit=settings.trading.daily_ai_cost_limit)
@@ -132,8 +139,15 @@ class GeminiClient(TradingLoggerMixin):
     def _save_daily_tracker(self):
         try:
             os.makedirs("logs", exist_ok=True)
-            with open(self.usage_file, "wb") as f:
-                pickle.dump(self.daily_tracker, f)
+            data = {
+                "date": self.daily_tracker.date,
+                "total_cost": self.daily_tracker.total_cost,
+                "request_count": self.daily_tracker.request_count,
+                "daily_limit": self.daily_tracker.daily_limit,
+                "is_exhausted": self.daily_tracker.is_exhausted,
+            }
+            with open(self.usage_file, "w", encoding="utf-8") as f:
+                json.dump(data, f)
         except Exception:
             pass
 
@@ -207,7 +221,7 @@ class GeminiClient(TradingLoggerMixin):
                         max_output_tokens=32768,
                     ),
                 ),
-                timeout=60.0,
+                timeout=180.0,
             )
             elapsed = time.time() - t0
 
@@ -216,6 +230,7 @@ class GeminiClient(TradingLoggerMixin):
             out_tok = getattr(usage, "candidates_token_count", 300) if usage else 300
             cost = self._estimate_cost(in_tok, out_tok)
 
+            self._last_decision_cost = cost
             self.total_cost += cost
             self.request_count += 1
             self.daily_tracker.total_cost += cost
