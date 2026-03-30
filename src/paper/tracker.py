@@ -47,6 +47,17 @@ def get_connection() -> sqlite3.Connection:
     return conn
 
 
+def has_pending_signal(market_id: str, side: str) -> bool:
+    """같은 market_id + side에 pending 시그널이 이미 있는지 확인."""
+    conn = get_connection()
+    row = conn.execute(
+        "SELECT COUNT(*) FROM signals WHERE market_id=? AND side=? AND outcome='pending'",
+        (market_id, side),
+    ).fetchone()
+    conn.close()
+    return row[0] > 0
+
+
 def log_signal(
     market_id: str, market_title: str, side: str, entry_price: float,
     confidence: float, reasoning: str, strategy: str = "directional",

@@ -140,13 +140,26 @@ async def process_and_queue_events(
         and m.category not in settings.trading.excluded_categories
     ]
 
-    # Volume + price filters
+    # Volume + expiry + token filters
     eligible = []
+    now_ts = int(time.time())
+    max_expiry_ts = now_ts + settings.trading.max_time_to_expiry_days * 86400
+    default_expiry_ts = now_ts + 86400 * 29  # 만기 불명확 마켓의 기본값 근처
+
     for m in category_filtered:
         if m.volume < settings.trading.min_volume:
             continue
         # 토큰 ID 없으면 주문 불가
         if not m.token_id_yes:
+            continue
+        # 만기일 불명확 (기본값 30일 뒤와 거의 같으면 → 만기 미지정)
+        if abs(m.expiration_ts - (now_ts + 86400 * 30)) < 86400:
+            continue
+        # 이미 만기 지남
+        if m.expiration_ts <= now_ts:
+            continue
+        # 30일 이내 만기만 (자금 유동화)
+        if m.expiration_ts > max_expiry_ts:
             continue
         eligible.append(m)
 
