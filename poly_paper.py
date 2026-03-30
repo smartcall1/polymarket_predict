@@ -186,6 +186,21 @@ async def check_settlements():
                             )
                             settled_count += 1
                             continue
+                        # ── 손절 체크: ROI -15% 이하 시 손절 ──
+                        if entry > 0:
+                            roi = (current_price - entry) / entry
+                            if roi <= -0.15:
+                                take_profit_signal(sig["id"], current_price)
+                                pnl = current_price - entry
+                                logger.info(f"STOP LOSS #{sig['id']}: {sig['market_title'][:40]} @ {current_price:.2f} (ROI={roi:.1%}, PnL={pnl:+.2f})")
+                                tg.notify_settlement(
+                                    market_title=sig.get("market_title", ""),
+                                    side=sig["side"], entry_price=entry,
+                                    exit_price=current_price, pnl=pnl, result="LOSS",
+                                )
+                                settled_count += 1
+                                continue
+
                 except Exception as e:
                     logger.debug(f"Price check failed for {sig['market_id']}: {e}")
 
