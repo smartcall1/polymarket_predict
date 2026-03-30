@@ -384,12 +384,12 @@ async def make_decision_for_market(
             rationale = getattr(decision, "reasoning", "No reasoning.")
 
             # Exit strategy — AI fair value 기반 익절: entry + 60% × (AI추정 - entry)
-            # 예: 10.5¢ 진입, AI 22% → 10.5 + 0.60*(22-10.5) = 17.7¢
-            ai_target_price = decision.confidence
+            # NO side: confidence(YES확률)를 1-confidence(NO fair value)로 변환
+            ai_fair_value = decision.confidence if decision.side.upper() == "YES" else 1.0 - decision.confidence
             volatility = estimate_market_volatility(market)
             ttx_days = get_time_to_expiry_days(market)
             stop_loss = max(0.01, price - 0.15 * max(0.5, min(2.0, volatility / 0.1)))
-            take_profit = min(0.99, price + 0.60 * (ai_target_price - price))
+            take_profit = min(0.99, price + 0.60 * (ai_fair_value - price))
             max_hold = min(int(72 * max(0.3, min(3.0, ttx_days / 7))), int(ttx_days * 24 * 0.8))
 
             position = Position(
