@@ -189,7 +189,7 @@ async def check_settlements():
                         # ── 손절 체크: ROI -15% 이하 시 손절 ──
                         if entry > 0:
                             roi = (current_price - entry) / entry
-                            if roi <= -0.15:
+                            if roi <= -0.20:
                                 take_profit_signal(sig["id"], current_price)
                                 pnl = current_price - entry
                                 logger.info(f"STOP LOSS #{sig['id']}: {sig['market_title'][:40]} @ {current_price:.2f} (ROI={roi:.1%}, PnL={pnl:+.2f})")
