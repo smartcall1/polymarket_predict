@@ -123,7 +123,7 @@ class EnsembleConfig:
         "bull_researcher": os.getenv("GEMINI_MODEL", "gemini-2.5-flash"),
         "bear_researcher": os.getenv("GEMINI_MODEL", "gemini-2.5-flash"),
         "risk_manager": os.getenv("GEMINI_MODEL", "gemini-2.5-flash"),
-        "trader": os.getenv("ENSEMBLE_TRADER_MODEL", "gemini-3.1-pro-preview"),
+        "trader": os.getenv("ENSEMBLE_TRADER_MODEL", "gemini-2.5-pro"),
     })
 
 
