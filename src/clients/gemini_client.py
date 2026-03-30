@@ -148,7 +148,10 @@ class GeminiClient(TradingLoggerMixin):
 
     def _estimate_cost(self, input_tokens: int = 500, output_tokens: int = 300, model: str = "") -> float:
         model = model or self.model_name
-        if "pro" in model.lower():
+        if "3.1-pro" in model or "3-pro" in model:
+            # Gemini 3/3.1 Pro: $2.00 input, $12.00 output
+            return (input_tokens / 1_000_000) * 2.00 + (output_tokens / 1_000_000) * 12.00
+        if "2.5-pro" in model:
             return (input_tokens / 1_000_000) * 1.25 + (output_tokens / 1_000_000) * 10.00
         # Flash (default)
         return (input_tokens / 1_000_000) * 0.30 + (output_tokens / 1_000_000) * 2.50
