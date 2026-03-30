@@ -12,10 +12,146 @@ from datetime import datetime
 from src.utils.database import DatabaseManager, Market, Position
 from src.config.settings import settings
 from src.utils.logging_setup import get_trading_logger
-from src.clients.gemini_client import GeminiClient
+from src.clients.gemini_client import GeminiClient, TradingDecision
 from src.clients.polymarket_client import PolymarketClient
+from src.utils.decision_logger import log_decision
 
 logger = get_trading_logger("decision_engine")
+
+
+async def _run_ensemble_decision(
+    market_data: Dict,
+    news_summary: str,
+    model_router,
+) -> Optional[Dict]:
+    """
+    Run multi-agent ensemble: 5 Flash agents vote → Trader Pro verifies.
+    Returns TradingDecision-compatible dict or None.
+    """
+    try:
+        from src.agents.ensemble import EnsembleRunner
+        from src.agents.trader_agent import TraderAgent
+
+        agent_models = settings.ensemble.agent_models
+
+        # Phase 1: Independent ensemble voting
+        runner = EnsembleRunner(
+            min_models=settings.ensemble.min_models_for_consensus,
+            disagreement_threshold=settings.ensemble.disagreement_threshold,
+        )
+
+        completions = {}
+        for role in runner.agents:
+            if role == "trader":
+                continue
+            role_model = agent_models.get(role, settings.api.gemini_model)
+
+            async def _make_fn(prompt, _model=role_model, _role=role):
+                return await model_router.get_completion(
+                    prompt=prompt, model=_model,
+                    strategy="ensemble", query_type=f"ensemble_{_role}",
+                    market_id=market_data.get("ticker"),
+                )
+            completions[role] = _make_fn
+
+        enriched = {**market_data, "news_summary": news_summary}
+        ensemble_result = await runner.run_ensemble(enriched, completions, context={})
+
+        if ensemble_result.get("error") or ensemble_result.get("probability") is None:
+            logger.warning(f"Ensemble failed: {ensemble_result.get('error')}")
+            return None
+
+        probability = ensemble_result["probability"]
+        confidence = ensemble_result["confidence"]
+        disagreement = ensemble_result["disagreement"]
+        yes_price = float(market_data.get("yes_price", 0.5))
+
+        logger.info(
+            f"Ensemble vote: prob={probability:.3f} conf={confidence:.3f} "
+            f"disagree={disagreement:.3f} market_yes={yes_price:.2f}"
+        )
+
+        # Gate: edge check
+        min_edge = settings.trading.min_edge
+        edge_yes = probability - yes_price
+        edge_no = (1 - probability) - (1 - yes_price)
+
+        if edge_yes >= min_edge:
+            suggested_side = "YES"
+            edge = edge_yes
+        elif edge_no >= min_edge:
+            suggested_side = "NO"
+            edge = edge_no
+        else:
+            logger.info(f"Ensemble: no edge (YES={edge_yes:+.3f}, NO={edge_no:+.3f}). SKIP.")
+            return None
+
+        if confidence < 0.50:
+            logger.info(f"Ensemble: confidence too low ({confidence:.2f}). SKIP.")
+            return None
+
+        if disagreement > settings.ensemble.disagreement_threshold:
+            logger.info(f"Ensemble: high disagreement ({disagreement:.3f}). SKIP.")
+            return None
+
+        # Phase 2: Trader verification (Pro model)
+        logger.info(f"Ensemble suggests BUY {suggested_side} (edge={edge:+.3f}). Running Trader (Pro)...")
+
+        trader = TraderAgent()
+        trader_model = agent_models.get("trader", "gemini-2.5-pro")
+
+        async def trader_completion(prompt):
+            return await model_router.get_completion(
+                prompt=prompt, model=trader_model,
+                strategy="ensemble_trader", query_type="ensemble_trader",
+                market_id=market_data.get("ticker"),
+            )
+
+        model_results = ensemble_result.get("model_results", [])
+        trader_context = {
+            "forecaster_result": next((r for r in model_results if r.get("_agent") == "forecaster"), None),
+            "news_result": next((r for r in model_results if r.get("_agent") == "news_analyst"), None),
+            "bull_result": next((r for r in model_results if r.get("_agent") == "bull_researcher"), None),
+            "bear_result": next((r for r in model_results if r.get("_agent") == "bear_researcher"), None),
+            "risk_result": next((r for r in model_results if r.get("_agent") == "risk_manager"), None),
+            "ensemble_meta": {
+                "probability": probability, "confidence": confidence,
+                "disagreement": disagreement, "suggested_side": suggested_side,
+                "edge": edge, "num_models": ensemble_result.get("num_models_used", 0),
+            },
+        }
+
+        trader_result = await trader.analyze(enriched, trader_context, trader_completion)
+
+        if trader_result.get("error"):
+            logger.warning(f"Trader verification failed: {trader_result['error']}")
+            return None
+
+        action = trader_result.get("action", "SKIP").upper()
+
+        # Trader 결정 로깅
+        log_decision(
+            market_id=market_data.get("ticker", "?"),
+            market_title=market_data.get("title", "?"),
+            action=f"TRADER_{action}",
+            side=trader_result.get("side", ""),
+            yes_price=float(market_data.get("yes_price", 0)),
+            confidence=float(trader_result.get("confidence", 0)),
+            edge=edge,
+            reasoning=trader_result.get("reasoning", "")[:500],
+            extra={"model": trader_model, "suggested_side": suggested_side},
+        )
+
+        if action in ("BUY", "SELL"):
+            logger.info(f"Trader CONFIRMED: {action} {trader_result.get('side')} conf={trader_result.get('confidence'):.2f}")
+            return trader_result
+
+        logger.info(f"Trader REJECTED ensemble suggestion (action={action}). SKIP.")
+        return None
+
+    except Exception as e:
+        logger.error(f"Ensemble decision failed: {e}", exc_info=True)
+        return None
 
 
 def _calculate_dynamic_quantity(
@@ -63,6 +199,7 @@ async def make_decision_for_market(
     db_manager: DatabaseManager,
     gemini_client: GeminiClient,
     poly_client: PolymarketClient,
+    model_router=None,
 ) -> Optional[Position]:
     """Analyze a single market and return a Position if trade is warranted."""
     logger.info(f"Analyzing: {market.title} ({market.market_id[:16]}...)")
@@ -155,13 +292,39 @@ async def make_decision_for_market(
             except Exception:
                 news_summary = "News search unavailable."
 
-        # AI decision
-        decision = await gemini_client.get_trading_decision(
-            market_data=market_data,
-            portfolio_data=portfolio_data,
-            news_summary=news_summary,
-        )
-        total_cost += getattr(decision, "cost", 0.0)
+        # --- Multi-Agent Ensemble Decision (when enabled) ---
+        multi_model_ensemble = hasattr(settings, 'ensemble') and settings.ensemble.enabled
+        decision = None
+
+        if multi_model_ensemble and model_router:
+            logger.info(f"Running multi-agent ensemble for {market.market_id}")
+            ensemble_result = await _run_ensemble_decision(
+                market_data=market_data,
+                news_summary=news_summary,
+                model_router=model_router,
+            )
+            if ensemble_result:
+                decision = TradingDecision(
+                    action=ensemble_result.get("action", "SKIP"),
+                    side=ensemble_result.get("side", "YES"),
+                    confidence=float(ensemble_result.get("confidence", 0.0)),
+                    limit_price=int(ensemble_result.get("limit_price", 50)) if ensemble_result.get("limit_price") else None,
+                )
+                decision.reasoning = ensemble_result.get("reasoning", "Multi-agent ensemble decision")
+            else:
+                logger.info("Ensemble returned no decision (SKIP). Respecting ensemble verdict.")
+                await db_manager.record_market_analysis(
+                    market.market_id, "ENSEMBLE_SKIP", 0.0, total_cost, "ensemble_no_edge")
+                return None
+
+        # --- Fallback: Single-model decision (ensemble 비활성 시에만) ---
+        if decision is None:
+            decision = await gemini_client.get_trading_decision(
+                market_data=market_data,
+                portfolio_data=portfolio_data,
+                news_summary=news_summary,
+            )
+            total_cost += getattr(decision, "cost", 0.0)
 
         if not decision:
             await db_manager.record_market_analysis(market.market_id, "SKIP", 0.0, total_cost, "no_decision")
@@ -171,6 +334,22 @@ async def make_decision_for_market(
             f"Decision: {decision.action} {decision.side} "
             f"conf={decision.confidence:.2f} price={decision.limit_price} "
             f"(cost: ${total_cost:.4f})"
+        )
+
+        # Decision log
+        edge_val = decision.confidence - (yes_price if decision.side.upper() == "YES" else no_price)
+        log_decision(
+            market_id=market.market_id,
+            market_title=market.title,
+            action=decision.action.upper(),
+            side=decision.side,
+            yes_price=yes_price,
+            no_price=no_price,
+            confidence=decision.confidence,
+            edge=edge_val,
+            reasoning=getattr(decision, 'reasoning', '') or '',
+            ai_cost=total_cost,
+            volume=market.volume,
         )
 
         await db_manager.record_market_analysis(
